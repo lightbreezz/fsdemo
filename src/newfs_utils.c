@@ -162,10 +162,10 @@ struct newfs_inode* newfs_alloc_inode(struct newfs_dentry * dentry) {
     memset(inode, 0, sizeof(struct newfs_inode));
     inode->ino  = ino_cursor; 
     inode->size = 0;
-    // for (int i = 0; i < NEWFS_DATA_PER_FILE; i++) {
-    //     inode->data_blocks[i] = -1;
-    //     inode->data_in_mem[i] = NULL;
-    // }
+    for (int i = 0; i < NEWFS_DATA_PER_FILE; i++) {
+        inode->data_blocks[i] = -1;
+        inode->data_in_mem[i] = NULL;
+    }
     inode->data_block_nums = 0;
                                                       /* dentry指向inode */
     dentry->inode = inode;
@@ -176,12 +176,6 @@ struct newfs_inode* newfs_alloc_inode(struct newfs_dentry * dentry) {
     inode->dir_cnt = 0;
     inode->dentrys = NULL;
 
-    if (NEWFS_IS_REG(inode)) {
-        for (int i = 0; i < NEWFS_DATA_PER_FILE; i++){
-            inode->data_in_mem[i] = (uint8_t *)malloc(NEWFS_BLKS_SZ(1));
-            inode->data_blocks[i] = -1;
-        }
-    }
     printf("alloc node: alloc mem for inode %d\n", inode->ino);
     
     return inode;
@@ -380,10 +374,10 @@ int newfs_alloc_dentry(struct newfs_inode* inode, struct newfs_dentry* dentry) {
         }
     }
 
-    if (!is_find_free_data || dno_cursor == newfs_super.max_data) {
+    if (!is_find_free_data || dno_cursor >= newfs_super.max_data) {
         return -NEWFS_ERROR_NOSPACE;
     }
-
+    printf("Allocated data block: %d\n", dno_cursor);
     return dno_cursor;
  }
 
@@ -773,14 +767,152 @@ int newfs_drop_inode(struct newfs_inode * inode) {
         }
     }
 
-    for (int i = 0; i < inode->data_block_nums; i++) {
-        if (NEWFS_IS_REG(inode)) {
-            if (inode->data_in_mem[i])
+    if (NEWFS_IS_REG(inode)) {
+        for (int i = 0; i < NEWFS_DATA_PER_FILE; i++) {
+            if (inode->data_in_mem[i]) {
                 free(inode->data_in_mem[i]);
+                inode->data_in_mem[i] = NULL;
+            }
         }
     }
     if (inode->data_in_mem)
         free(inode->data_in_mem);
     free(inode);
+    return NEWFS_ERROR_NONE;
+}
+
+/**
+ * @brief 将数据写入inode对应的文件中
+ * 
+ * @param inode 一个文件的索引结点
+ * @param buf 待写入的数据
+ * @param size 待写入的数据大小
+ * @param offset 写入的起始偏移
+ * @return 状态码 
+ */
+int newfs_write_data(struct newfs_inode * inode, uint8_t * buf, size_t size, int offset) {
+    int block_size = NEWFS_BLKS_SZ(1);
+    int end_pos = offset + size;
+    int start_block = offset / block_size;
+    int end_block = (end_pos - 1) / block_size;
+    int blocks_needed = end_block - start_block + 1;
+
+    // 检查是否需要分配新的数据块
+    if (end_block >= inode->data_block_nums) {
+        int blocks_to_alloc = end_block - inode->data_block_nums + 1;
+        if (inode->data_block_nums + blocks_to_alloc > NEWFS_DATA_PER_FILE) {
+            return -NEWFS_ERROR_NOSPACE;
+        }
+        
+        for (int i = 0; i < blocks_to_alloc; i++) {
+            int new_block = newfs_alloc_one_block();
+            inode->data_blocks[inode->data_block_nums] = new_block;
+            
+            // 确保内存缓存已分配
+            if (!inode->data_in_mem[inode->data_block_nums]) {
+                inode->data_in_mem[inode->data_block_nums] = (uint8_t *)malloc(block_size);
+                memset(inode->data_in_mem[inode->data_block_nums], 0, block_size);
+            }
+            
+            inode->data_block_nums++;
+        }
+    }
+
+    // 执行写入
+    if (buf != NULL) {
+        int bytes_written = 0;
+        int current_offset = offset;
+        
+        while (bytes_written < size) {
+            int block_index = current_offset / block_size;
+            int block_offset = current_offset % block_size;
+            int bytes_to_write = block_size - block_offset;
+            if (bytes_to_write > size - bytes_written) {
+                bytes_to_write = size - bytes_written;
+            }
+            
+            // 确保内存缓存有效
+            if (!inode->data_in_mem[block_index]) {
+                inode->data_in_mem[block_index] = (uint8_t *)malloc(block_size);
+                memset(inode->data_in_mem[block_index], 0, block_size);
+            }
+            
+            memcpy(inode->data_in_mem[block_index] + block_offset, 
+                   buf + bytes_written, bytes_to_write);
+            
+            bytes_written += bytes_to_write;
+            current_offset += bytes_to_write;
+        }
+        
+        // 更新文件大小
+        if (end_pos > inode->size) {
+            inode->size = end_pos;
+        }
+    } else {
+        // truncate 操作
+        inode->size = offset;
+    }
+
+    return NEWFS_ERROR_NONE;
+}
+
+/**
+ * @brief 将inode对应的文件数据读出
+ * 
+ * @param inode 一个文件的索引结点
+ * @param buf 读出的数据存放处
+ * @param size 读出的数据大小
+ * @param offset 读出的起始偏移
+ * @return 状态码 
+ */
+int newfs_read_data(struct newfs_inode * inode, uint8_t * buf, size_t size, int offset) {
+    if (offset < 0 || offset >= inode->size) {
+        return -NEWFS_ERROR_INVAL;
+    }
+    
+    // 调整读取大小
+    if (offset + size > inode->size) {
+        size = inode->size - offset;
+    }
+
+    int block_size = NEWFS_BLKS_SZ(1);
+    int bytes_read = 0;
+    int current_offset = offset;
+    
+    while (bytes_read < size) {
+        int block_index = current_offset / block_size;
+        
+        // 检查块索引是否有效
+        if (block_index >= inode->data_block_nums) {
+            break;
+        }
+        
+        int block_offset = current_offset % block_size;
+        int bytes_to_read = block_size - block_offset;
+        if (bytes_to_read > size - bytes_read) {
+            bytes_to_read = size - bytes_read;
+        }
+        
+        // 确保内存缓存有效
+        if (!inode->data_in_mem[block_index]) {
+            // 从磁盘读取数据到内存缓存
+            inode->data_in_mem[block_index] = (uint8_t *)malloc(block_size);
+            if (newfs_driver_read(NEWFS_DATA_OFS(inode->data_blocks[block_index]), 
+                                inode->data_in_mem[block_index], 
+                                block_size) != NEWFS_ERROR_NONE) {
+                free(inode->data_in_mem[block_index]);
+                inode->data_in_mem[block_index] = NULL;
+                return -NEWFS_ERROR_IO;
+            }
+        }
+        
+        memcpy(buf + bytes_read, 
+               inode->data_in_mem[block_index] + block_offset, 
+               bytes_to_read);
+        
+        bytes_read += bytes_to_read;
+        current_offset += bytes_to_read;
+    }
+    
     return NEWFS_ERROR_NONE;
 }

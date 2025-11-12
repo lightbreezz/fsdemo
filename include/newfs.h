@@ -40,6 +40,8 @@ int 			   newfs_driver_write(int offset, uint8_t *in_content, int size);
 struct newfs_dentry* newfs_get_dentry(struct newfs_inode * inode, int dir);
 int 			   newfs_drop_dentry(struct newfs_inode * inode, struct newfs_dentry * dentry);
 int 			   newfs_drop_inode(struct newfs_inode * inode);
+int 			   newfs_write_data(struct newfs_inode * inode, uint8_t * buf, size_t size, int offset);
+int 				newfs_read_data(struct newfs_inode * inode, uint8_t * buf, size_t size, int offset);
 
 
 /******************************************************************************
